@@ -1,0 +1,16 @@
+# Optional: keep Terraform state in a Google Cloud Storage (GCS) bucket instead of local state.
+# Recommended for teams and long-lived deployments (state holds generated secrets).
+#
+#   cp backend.tf.example backend.tf     # backend.tf is gitignored
+#   terraform init -migrate-state        # moves existing local state into the bucket
+#
+# The GCS bucket must exist before init. Create one with:
+#   gcloud storage buckets create gs://<bucket-name> --location=<region> \
+#     --uniform-bucket-level-access --public-access-prevention
+#   gcloud storage buckets update gs://<bucket-name> --versioning
+terraform {
+  backend "gcs" {
+    bucket = "my-terraform-state-bucket"
+    prefix = "helpdesk-gcp"
+  }
+}

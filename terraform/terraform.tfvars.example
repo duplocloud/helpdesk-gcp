@@ -1,0 +1,63 @@
+# Copy to terraform.tfvars. Commented lines show defaults.
+
+# ══ REQUIRED ══════════════════════════════════════════════════════════════════
+project_id = "my-gcp-project"
+region     = "us-central1"
+
+helpdesk_dns       = "helpdesk.example.com"
+helpdesk_xterm_dns = "helpdesk-xterm.example.com"
+
+# Chart values (MongoDB password, login, Slack, ...); start from values-override.example.yml.
+helm_values_override_file = "values-override.yml"
+
+# ══ Deployment ════════════════════════════════════════════════════════════════
+# prefix           = "duplo-ai"   # 1-17 chars, used in resource names
+# environment      = "production"
+# credentials_file = ""           # default: Application Default Credentials
+
+# ══ DNS ═══════════════════════════════════════════════════════════════════════
+# Cloud DNS zone NAME (not the domain). Other providers: unset, use `terraform output dns_records`.
+dns_managed_zone = "example-com"
+# dns_project_id = "my-dns-project"
+
+# ══ GKE (Standard only, no Autopilot) ═════════════════════════════════════════
+# cluster_name                   = ""           # default: gke-<prefix>
+# release_channel                = ""           # default: REGULAR
+# gke_enable_dns_endpoint        = false
+# gke_control_plane_logs_enabled = true
+# gke_deletion_protection        = false
+# UTC:
+# gke_maintenance_window = { start_time = "2026-01-03T03:00:00Z", end_time = "2026-01-03T11:00:00Z", recurrence = "FREQ=WEEKLY;BYDAY=SA,SU" }
+# Same region; set before the first apply:
+# cmek_key = "projects/my-gcp-project/locations/us-central1/keyRings/helpdesk/cryptoKeys/gke"
+
+# node_min/node_max are totals across zones.
+# node_machine_type = "e2-standard-4"
+# node_min          = 0
+# node_max          = 3
+# node_zones        = []   # default: all zones
+# node_disk_size    = 50
+# node_disk_type    = "pd-balanced"
+
+# ══ Networking ════════════════════════════════════════════════════════════════
+# subnet_cidr             = "10.0.0.0/20"
+# pods_cidr               = "10.4.0.0/14"
+# services_cidr           = "10.8.0.0/20"
+# proxy_only_subnet_cidr  = "10.16.0.0/23"
+# psa_range_prefix_length = 20
+# master_authorized_cidrs = [{ cidr_block = "203.0.113.10/32", display_name = "office" }]
+# nat_ip_allocation   = "auto"   # auto | static
+# nat_static_ip_count = 1
+
+# ══ Helm chart ════════════════════════════════════════════════════════════════
+# helm_chart_version                   = "0.2.24"
+# helm_release_name                    = "duplo-ai-helpdesk"
+# helm_namespace                       = "duplo-helpdesk"
+# backend_impersonate_service_accounts = []   # SAs in other projects
+
+# Analytics collector (usage reporting, enabled by default):
+# helpdesk_analytics_collector_enabled      = true
+# helpdesk_analytics_collector_app_instance = ""   # empty defaults to prefix ("duplo-ai")
+
+# ══ Labels ════════════════════════════════════════════════════════════════════
+# common_labels = { team = "platform", cost_center = "1234" }

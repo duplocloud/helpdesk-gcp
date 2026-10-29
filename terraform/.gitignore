@@ -1,0 +1,51 @@
+# Terraform state
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+errored.tfstate
+
+# Lockfile
+!.terraform.lock.hcl
+
+# Variables (secrets)
+terraform.tfvars
+*.auto.tfvars
+
+# SA keys
+*-key.json
+*-credentials.json
+gcp-key*.json
+
+# Chart values override (secrets)
+values-override.yml
+values-override.yaml
+tfplan
+tfplan*
+*.log
+kubeconfig.yaml
+*kubeconfig*
+
+# Helm cache
+.helm/
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Backend config (keep the .example; ignore the real one)
+backend.tf
+backend.hcl
+*.backend.hcl
+
+# macOS
+.DS_Store
+
+# Per-environment variables
+*.tfvars
