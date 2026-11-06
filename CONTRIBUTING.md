@@ -32,11 +32,27 @@ equivalent repo) breaks:
   project ID), `state` (app root; `platform_key` is the platform root's GCS prefix),
   `secrets` (sensitive map, app root), `common_tags`.
 - **Outputs**: the output names in `platform/outputs.tf` and `app/outputs.tf` are part of the contract.
-  They are GCP names; the agent reads `certificate_id`, `certificate_validation_records`, `dns_mode`
-  (platform) and `gateway_ip`, `helpdesk_url`, `dns_records`, `secrets`, `generated` (app).
+  They follow `terraform-aws-helpdesk` where the concept is the same; the agent reads `certificate_arn`,
+  `certificate_validation_records`, `dns_mode` (platform) and `load_balancer_hostname`, `helpdesk_url`,
+  `dns_records`, `secrets`, `generated` (app).
 - **No secrets on disk**: no `local_file`/`local_sensitive_file`; secrets only via `var.secrets`; generated
   secrets via `random_password`.
 - **No `ui.yaml`** or other wizard files: the agent keeps its presentation layer in its own repo.
+
+## Where this repo differs from `terraform-aws-helpdesk`
+
+Deliberate, so keep them unless the AWS repo changes too:
+
+- **Shared storage is in the `app` root** (`storage` layer). AWS creates EFS in `platform` and its storage class
+  in `app` (`addons`). On GKE the Filestore instance is created by the CSI driver from a StorageClass, which is a
+  Kubernetes object, so the whole layer belongs to the root that talks to the cluster. No `addons` layer: the
+  Gateway API and the Filestore CSI driver are GKE add-ons turned on by the cluster module.
+- **Validation blocks on the layer variables** (`platform/variables.tf`, `app/variables.tf`). They reject inputs
+  that would otherwise plan and fail late (a missing secondary range, a cluster on another VPC); AWS has none.
+- **Each module has its own `versions.tf`** with its `required_providers`, so a module can be tested on its own.
+- **CI also runs TFLint** (`.tflint.hcl`).
+- **Output and `provides` names** reuse the AWS names where the concept is the same (`vpc_id`, `certificate_arn`,
+  `bucket_arn`, `load_balancer_hostname`), even though the GCP values are not ARNs or hostnames.
 
 ## Upgrade safety
 

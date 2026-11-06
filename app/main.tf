@@ -45,6 +45,8 @@ module "storage" {
   source = "../modules/storage"
 
   mode                          = var.storage.mode
+  deployment_name               = var.deployment.name
+  project_id                    = var.deployment.account_id
   network_name                  = local.platform.network_name
   filestore_ip                  = try(var.storage.provides.filestore_ip, null)
   filestore_share               = try(var.storage.provides.filestore_share, null)

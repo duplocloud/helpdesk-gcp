@@ -8,9 +8,13 @@ locals {
     var.helpdesk_analytics_collector_enabled ? { collector = "${var.release_name}-collector" } : {},
   )
 
+  # Project-level roles, the same grants as on AWS: the agent calls the model (Bedrock there, Vertex AI here); the
+  # backend has none, only its buckets (workload_identity.tf) and the service accounts it may impersonate. As on AWS,
+  # a customer's own service account trusting the backend is what gates its access to that project. Token creator is
+  # never granted project-wide (it would let a pod mint tokens for any service account, the deployer's included).
   workload_roles = {
-    backend = ["roles/iam.serviceAccountTokenCreator", "roles/viewer", "roles/container.viewer"]
-    agent   = ["roles/aiplatform.user", "roles/iam.serviceAccountTokenCreator"]
+    backend = []
+    agent   = ["roles/aiplatform.user"]
   }
 
   workload_role_grants = merge([

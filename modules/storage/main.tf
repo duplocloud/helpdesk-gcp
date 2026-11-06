@@ -29,6 +29,8 @@ resource "kubernetes_storage_class_v1" "filestore" {
     # The VPC has no Private Service Access connection, which the chart's default connect mode needs.
     network        = var.network_name
     "connect-mode" = "DIRECT_PEERING"
+    # The CSI driver puts these labels on the instance, so it can be found after a destroy (filestore_cleanup).
+    labels = "duplocloud-deployment=${var.deployment_name},duplocloud-managed-by=cloud-deployment-agent"
   }
 }
 

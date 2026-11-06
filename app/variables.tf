@@ -61,6 +61,16 @@ variable "helpdesk" {
     condition     = can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", try(var.helpdesk.values.namespace, "helpdesk")))
     error_message = "helpdesk.values.namespace must be a Kubernetes name: lowercase letters, digits and '-', at most 63 characters."
   }
+
+  # Each entry becomes an IAM binding on projects/-/serviceAccounts/<email>: anything but a service account email breaks
+  # it. Any Google service account domain: user-managed (iam.), Compute Engine (developer.) and App Engine (appspot.).
+  validation {
+    condition = alltrue([
+      for e in try(coalesce(var.helpdesk.values.backend_impersonate_service_accounts), []) :
+      can(regex("^[a-z0-9][-a-z0-9]{0,62}@(([-a-z0-9]+\\.)+iam|developer|appspot)\\.gserviceaccount\\.com$", e))
+    ])
+    error_message = "helpdesk.values.backend_impersonate_service_accounts must be service account emails: <name>@<project>.iam.gserviceaccount.com, <number>-compute@developer.gserviceaccount.com or <project>@appspot.gserviceaccount.com."
+  }
 }
 
 variable "secrets" {

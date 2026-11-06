@@ -26,10 +26,3 @@ variable "lifecycle_expiration_days" {
   default     = 90
   nullable    = false
 }
-
-variable "labels" {
-  description = "Labels for the buckets"
-  type        = map(string)
-  default     = {}
-  nullable    = false
-}

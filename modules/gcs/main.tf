@@ -17,7 +17,7 @@ resource "google_storage_bucket" "this" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
   force_destroy               = false
-  labels                      = merge(var.labels, { component = "storage" })
+  labels                      = { component = "storage" }
 
   versioning {
     enabled = true

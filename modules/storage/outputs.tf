@@ -17,3 +17,11 @@ output "nfs_server" {
   description = "NFS export the provisioner serves (null unless existing mode)"
   value       = local.existing ? "${var.filestore_ip}:/${var.filestore_share}" : null
 }
+
+output "filestore_cleanup" {
+  description = "Filestore mode: the command that lists the instance a destroy leaves (Retain); null in other modes"
+  value = local.csi ? join(" ", [
+    "gcloud filestore instances list --project ${var.project_id}",
+    "--filter='labels.duplocloud-deployment=${var.deployment_name}'",
+  ]) : null
+}

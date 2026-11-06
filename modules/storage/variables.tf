@@ -8,10 +8,24 @@ variable "mode" {
   }
 }
 
+variable "deployment_name" {
+  description = "Deployment name, put on the Filestore instance as the duplocloud-deployment label (filestore mode)"
+  type        = string
+  default     = ""
+  nullable    = false
+}
+
+variable "project_id" {
+  description = "Project the Filestore instance is created in (filestore mode; used in the cleanup command)"
+  type        = string
+  default     = ""
+  nullable    = false
+}
+
 variable "storage_class_name" {
   description = "Name of the RWX storage class Helpdesk mounts"
   type        = string
-  default     = "ai-studio-efs"
+  default     = "ai-studio-filestore"
   nullable    = false
 }
 

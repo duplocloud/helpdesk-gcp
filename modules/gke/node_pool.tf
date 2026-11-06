@@ -43,7 +43,7 @@ resource "google_container_node_pool" "default" {
       mode = "GKE_METADATA"
     }
 
-    resource_labels = merge(var.labels, { component = "kubernetes-engine" })
+    resource_labels = merge(var.node_labels, { component = "kubernetes-engine" })
 
     labels = {
       "duplocloud.net/component" = "helpdesk"

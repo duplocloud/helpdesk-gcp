@@ -1,9 +1,13 @@
+# Names every resource <fullname>-...; the agent's existingClaim below relies on it.
+fullnameOverride: ${fullname}
 config:
   cloudProvider: GCP
   authFrontendBaseUrl: https://${helpdesk_dns}
   authAllowedOrigins: https://${helpdesk_dns}
   infraRegion: ${region}
   googleCloudProject: ${project_id}
+  mongoDbDatabaseName: duplo-ai-helpdesk
+  aiStudioIsMasterDisabled: true
   # Sign-in is the local admin only, who is also the one super user.
   authSuperUsers: ${local_admin_email}
 backend:
@@ -74,7 +78,7 @@ nfs-server:
     size: ${nfs_server_disk_size}
 %{ endif ~}
 xterm:
-  enabled: false
+  enabled: true
   hostname: https://${helpdesk_xterm_dns}
 # Gateway API instead of Ingress; ingress.paths still drive the HTTPRoutes.
 ingress:
@@ -97,11 +101,30 @@ mongodb:
     rootUser: helpdesk
   selfHosted:
     enabled: false
-bedrockSubscription:
-  enabled: false
-%{ if !helpdesk_mcp_enabled ~}
-helpdeskMcp:
-  enabled: false
+  # Sub-chart mongodump backup disabled, as on AWS: the chart's own backup (mongodbBackup) renders a claim with the
+  # same name (<release>-mongodb-mongodump) and the two collide on a fresh install of chart >= 0.2.19. That claim
+  # keeps the chart default, the cluster's default Persistent Disk class (no Filestore instance); the release doesn't
+  # wait, so its WaitForFirstConsumer binding until the first nightly run holds nothing up.
+  backup:
+    enabled: false
+slackBackend:
+  enabled: ${slack_backend_enabled}
+%{ if slack_backend_enabled ~}
+%{ if slack_backend_image_tag != "" ~}
+  image:
+    tag: "${slack_backend_image_tag}"
+%{ endif ~}
+  env:
+    helpdeskDefaultAgent: "${slack_helpdesk_default_agent}"
+    helpdeskDefaultWorkspace: "${slack_helpdesk_default_workspace}"
+  # The Slack tokens are passed as sensitive Helm set values and never rendered into this document.
+  envFromSecret:
+    create: true
+    secretName: slack-managed-portals
+    data:
+      DUPLO_SLACK_APP_PORTALS: ${jsonencode(slack_app_portals)}
+      helpdeskDefaultAgent: "${slack_helpdesk_default_agent}"
+      helpdeskDefaultWorkspace: "${slack_helpdesk_default_workspace}"
 %{ endif ~}
 %{ if collector_enabled ~}
 collector:

@@ -111,60 +111,104 @@ run "existing_network" {
       mode   = "existing"
       values = {}
       provides = {
-        network_id = "projects/acme-prod/global/networks/corp"
-        subnet_id  = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1"
+        vpc_id              = "projects/acme-prod/global/networks/corp"
+        subnet_id           = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1"
+        pods_range_name     = "gke-pods"
+        services_range_name = "gke-services"
       }
     }
   }
 
-  override_data {
-    target = data.google_compute_subnetwork.adopted[0]
-    values = {
-      secondary_ip_range = [
-        { range_name = "gke-services", ip_cidr_range = "10.70.0.0/20", reserved_internal_range = "" },
-        { range_name = "gke-pods", ip_cidr_range = "10.60.0.0/14", reserved_internal_range = "" },
-      ]
-    }
-  }
-
   assert {
-    condition     = length(module.vpc) == 0 && output.network_id == "projects/acme-prod/global/networks/corp"
+    condition     = length(module.vpc) == 0 && output.vpc_id == "projects/acme-prod/global/networks/corp"
     error_message = "An adopted network creates nothing and passes through."
   }
   assert {
     condition     = output.pods_range_name == "gke-pods" && output.services_range_name == "gke-services"
-    error_message = "The adopted subnet's Pod and Service ranges are found by name."
+    error_message = "The adopted subnet's Pod and Service ranges are the ones picked, not guessed from their names."
   }
 }
 
-run "existing_network_new_ranges" {
-  command = apply
+run "existing_network_requires_picked_ranges" {
+  command = plan
 
   variables {
     network = {
       mode     = "existing"
       values   = {}
-      provides = { network_id = "projects/acme-prod/global/networks/corp", subnet_id = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1" }
+      provides = { vpc_id = "projects/acme-prod/global/networks/corp", subnet_id = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1" }
     }
   }
 
-  override_data {
-    target = data.google_compute_subnetwork.adopted[0]
-    values = {
-      secondary_ip_range = [{ range_name = "legacy", ip_cidr_range = "10.80.0.0/20", reserved_internal_range = "" }]
+  expect_failures = [var.network]
+}
+
+run "existing_network_rejects_a_cleared_range" {
+  command = plan
+
+  variables {
+    network = {
+      mode   = "existing"
+      values = {}
+      provides = {
+        vpc_id              = "projects/acme-prod/global/networks/corp"
+        subnet_id           = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1"
+        pods_range_name     = "gke-pods"
+        services_range_name = null
+      }
     }
   }
 
-  assert {
-    condition     = output.pods_range_name == null && output.services_range_name == null
-    error_message = "With fewer than two ranges on the adopted subnet, GKE creates them."
+  expect_failures = [var.network]
+}
+
+run "existing_network_rejects_one_range_for_both" {
+  command = plan
+
+  variables {
+    network = {
+      mode   = "existing"
+      values = {}
+      provides = {
+        vpc_id              = "projects/acme-prod/global/networks/corp"
+        subnet_id           = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1"
+        pods_range_name     = "gke-pods"
+        services_range_name = "gke-pods"
+      }
+    }
   }
+
+  expect_failures = [var.network]
+}
+
+run "existing_network_rejects_a_bad_subnet" {
+  command = plan
+
+  variables {
+    network = {
+      mode     = "existing"
+      values   = {}
+      provides = { vpc_id = "projects/acme-prod/global/networks/corp", subnet_id = "corp-usc1", pods_range_name = "p", services_range_name = "s" }
+    }
+  }
+
+  expect_failures = [var.network]
 }
 
 run "existing_cluster" {
   command = apply
 
   variables {
+    network = {
+      mode   = "existing"
+      values = {}
+      provides = {
+        vpc_id              = "projects/acme-prod/global/networks/corp"
+        subnet_id           = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1"
+        pods_range_name     = "gke-pods"
+        services_range_name = "gke-services"
+      }
+    }
     cluster = {
       mode   = "existing"
       values = {}
@@ -173,6 +217,7 @@ run "existing_cluster" {
         cluster_endpoint       = "198.51.100.7"
         cluster_ca_certificate = "Q0E="
         workload_pool          = "acme-prod.svc.id.goog"
+        network_id             = "https://www.googleapis.com/compute/v1/projects/acme-prod/global/networks/corp"
       }
     }
   }
@@ -183,6 +228,56 @@ run "existing_cluster" {
   }
 }
 
+run "existing_cluster_rejects_another_vpc" {
+  command = plan
+
+  variables {
+    network = {
+      mode   = "existing"
+      values = {}
+      provides = {
+        vpc_id              = "projects/acme-prod/global/networks/corp"
+        subnet_id           = "projects/acme-prod/regions/us-central1/subnetworks/corp-usc1"
+        pods_range_name     = "gke-pods"
+        services_range_name = "gke-services"
+      }
+    }
+    cluster = {
+      mode     = "existing"
+      values   = {}
+      provides = { cluster_name = "other-gke", cluster_endpoint = "198.51.100.8", cluster_ca_certificate = "Q0E=", network_id = "projects/acme-prod/global/networks/other" }
+    }
+  }
+
+  expect_failures = [var.cluster]
+}
+
+run "existing_cluster_rejects_a_new_vpc" {
+  command = plan
+
+  variables {
+    cluster = {
+      mode     = "existing"
+      values   = {}
+      provides = { cluster_name = "corp-gke", cluster_endpoint = "198.51.100.7", cluster_ca_certificate = "Q0E=", network_id = "projects/acme-prod/global/networks/corp" }
+    }
+  }
+
+  expect_failures = [var.cluster]
+}
+
+run "existing_cluster_saved_without_network_id_still_plans" {
+  command = plan
+
+  variables {
+    cluster = {
+      mode     = "existing"
+      values   = {}
+      provides = { cluster_name = "corp-gke", cluster_endpoint = "198.51.100.7", cluster_ca_certificate = "Q0E=" }
+    }
+  }
+}
+
 run "existing_buckets" {
   command = apply
 
@@ -190,7 +285,7 @@ run "existing_buckets" {
     buckets = {
       mode     = "existing"
       values   = {}
-      provides = { bucket_name = "corp-data", bucket_url = "gs://corp-data" }
+      provides = { bucket_name = "corp-data", bucket_arn = "gs://corp-data" }
     }
   }
 
@@ -220,12 +315,26 @@ run "dns_certificate" {
     dns = {
       mode     = "certificate"
       values   = {}
-      provides = { certificate_map_name = "corp-certmap", certificate_id = "projects/acme-prod/locations/global/certificates/corp" }
+      provides = { certificate_map_name = "corp-certmap", certificate_arn = "projects/acme-prod/locations/global/certificates/corp" }
     }
   }
 
   assert {
     condition     = length(module.dns) == 0 && output.certificate_map_name == "corp-certmap" && length(output.certificate_validation_records) == 0
     error_message = "An adopted certificate map creates nothing."
+  }
+}
+
+run "dns_certificate_without_optional_provides" {
+  command = apply
+
+  variables {
+    dns = { mode = "certificate", values = {}, provides = { certificate_map_name = "corp-certmap" } }
+  }
+
+  assert {
+    condition = (output.certificate_map_name == "corp-certmap" && output.certificate_arn == null
+    && output.dns_zone_name == "" && output.dns_zone_project == "acme-prod" && length(output.certificate_validation_records) == 0)
+    error_message = "An adopted certificate map plans with only its name; the other DNS values fall back as on AWS."
   }
 }

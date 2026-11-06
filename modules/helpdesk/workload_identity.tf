@@ -14,8 +14,6 @@ resource "google_service_account_iam_member" "this" {
   member             = each.value.member
 }
 
-# Project-wide token creator is intended.
-#trivy:ignore:GCP-0011
 resource "google_project_iam_member" "workload" {
   for_each = local.workload_role_grants
 

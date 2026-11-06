@@ -24,29 +24,15 @@ variable "subnet_id" {
 }
 
 variable "pods_range_name" {
-  description = "Existing secondary range for Pod IPs; null lets GKE add one to the subnet from pods_cidr"
+  description = "Secondary range of the node subnet for Pod IPs (created by the vpc module or picked from the adopted subnet)"
   type        = string
   default     = null
 }
 
 variable "services_range_name" {
-  description = "Existing secondary range for Service IPs; null lets GKE add one to the subnet from services_cidr"
+  description = "Secondary range of the node subnet for Service IPs (created by the vpc module or picked from the adopted subnet)"
   type        = string
   default     = null
-}
-
-variable "pods_cidr" {
-  description = "CIDR for a GKE-created Pod range (only when pods_range_name is null)"
-  type        = string
-  default     = "10.4.0.0/14"
-  nullable    = false
-}
-
-variable "services_cidr" {
-  description = "CIDR for a GKE-created Service range (only when services_range_name is null)"
-  type        = string
-  default     = "10.8.0.0/20"
-  nullable    = false
 }
 
 variable "release_channel" {
@@ -138,17 +124,17 @@ variable "control_plane_logs_enabled" {
   nullable    = false
 }
 
+variable "node_labels" {
+  description = "Labels for the node VMs; provider default_labels don't reach a node pool's node_config.resource_labels"
+  type        = map(string)
+  default     = {}
+  nullable    = false
+}
+
 variable "additional_admin_members" {
   description = "Extra IAM members granted roles/container.admin on the project, e.g. user:ops@example.com"
   type        = list(string)
   default     = []
-  nullable    = false
-}
-
-variable "labels" {
-  description = "Labels for the cluster and node VMs"
-  type        = map(string)
-  default     = {}
   nullable    = false
 }
 

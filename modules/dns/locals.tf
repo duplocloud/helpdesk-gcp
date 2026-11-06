@@ -4,7 +4,7 @@ locals {
     xterm    = var.helpdesk_xterm_dns
   }
 
-  labels = merge(var.labels, { component = "dns" })
+  labels = { component = "dns" }
 
   # <cluster_name>-<purpose>, as in the AWS repo (63 characters max; longer names keep a hash of the full name).
   names = { for k, v in {

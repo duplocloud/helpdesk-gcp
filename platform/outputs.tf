@@ -8,8 +8,8 @@ output "network_name" {
   value       = local.network_id == null ? null : reverse(split("/", local.network_id))[0]
 }
 
-output "network_id" {
-  description = "VPC network ID"
+output "vpc_id" {
+  description = "VPC network ID (projects/<project>/global/networks/<name>)"
   value       = local.network_id
 }
 
@@ -19,12 +19,12 @@ output "subnet_id" {
 }
 
 output "pods_range_name" {
-  description = "Pod secondary range name (null: GKE created it)"
+  description = "Pod secondary range name of the node subnet"
   value       = local.pods_range_name
 }
 
 output "services_range_name" {
-  description = "Service secondary range name (null: GKE created it)"
+  description = "Service secondary range name of the node subnet"
   value       = local.services_range_name
 }
 
@@ -58,9 +58,9 @@ output "bucket_name" {
   value       = local.bucket_name
 }
 
-output "bucket_url" {
-  description = "App data bucket URL (gs://...)"
-  value       = local.bucket_url
+output "bucket_arn" {
+  description = "App data bucket URL (gs://...); named as on AWS"
+  value       = local.bucket_arn
 }
 
 output "userdata_bucket_name" {
@@ -68,14 +68,14 @@ output "userdata_bucket_name" {
   value       = local.userdata_bucket_name
 }
 
-output "userdata_bucket_url" {
-  description = "User data bucket URL (gs://...)"
-  value       = local.userdata_bucket_url
+output "userdata_bucket_arn" {
+  description = "User data bucket URL (gs://...); named as on AWS"
+  value       = local.userdata_bucket_arn
 }
 
-output "certificate_id" {
-  description = "Certificate Manager certificate ID"
-  value       = local.certificate_id
+output "certificate_arn" {
+  description = "Certificate Manager certificate ID; named as on AWS"
+  value       = local.certificate_arn
 }
 
 output "certificate_map_name" {

@@ -38,10 +38,3 @@ variable "dns_project_id" {
   default     = ""
   nullable    = false
 }
-
-variable "labels" {
-  description = "Labels for the certificate resources"
-  type        = map(string)
-  default     = {}
-  nullable    = false
-}

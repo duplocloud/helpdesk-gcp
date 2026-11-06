@@ -1,4 +1,4 @@
-# helpdesk-gcp
+# terraform-google-helpdesk
 
 OpenTofu / Terraform code that deploys [DuploCloud](https://duplocloud.com) **Helpdesk** into your own Google Cloud
 project: a VPC, a private GKE cluster, shared storage, Cloud Storage buckets, a Google-managed certificate
@@ -8,7 +8,8 @@ Every layer can be **created** or can **adopt** something you already have: an e
 GKE cluster, Filestore instance, bucket or certificate map. Adopted resources are read, never modified, so
 the same code serves a new project (greenfield) and one with an established platform (brownfield).
 
-The repository works on its own, and it is also what the DuploCloud DevKit's Cloud Deployment agent runs.
+The repository works on its own, and it is also what the DuploCloud DevKit's Cloud Deployment agent runs. It was
+first published as `duplocloud/helpdesk-gcp`; GitHub redirects the old name.
 It follows the same layout and contract as
 [`terraform-aws-helpdesk`](https://github.com/duplocloud/terraform-aws-helpdesk).
 
@@ -47,7 +48,7 @@ flowchart LR
 | `cluster` | platform | `gke` | Regional GKE Standard with private nodes, Workload Identity, Filestore CSI driver, node pool | `eks` |
 | `buckets` | platform | `gcs` | App-data and user-data buckets (uniform access, public access prevented) | `s3` |
 | `dns` | platform | `dns` | Certificate Manager certificate and map, DNS authorizations, Cloud DNS records | `dns` |
-| `storage` | app | `storage` | NFS provisioner for an existing Filestore share (other modes are handled by the chart) | `efs` + `addons` |
+| `storage` | app | `storage` | The Filestore StorageClass, or the NFS provisioner for an existing Filestore share (in-cluster NFS is the chart's) | `efs` + `addons` (shared files) |
 | `helpdesk` | app | `helpdesk` | Namespace, Workload Identity service accounts, gateway IP, SSL policy, A records, Helm release | `helpdesk` |
 
 There are two roots because the `app` root configures its Kubernetes and Helm providers from a cluster that
@@ -146,12 +147,21 @@ default.
 
 | Layer | Root | Modes | `provides` for adopt modes |
 |---|---|---|---|
-| `network` | platform | `create`, `existing` | `network_id` (the VPC; global) and `subnet_id` (the node subnet in the region). The subnet's Pod and Service ranges are reused when it has them (found by name, e.g. `*pods*`, `*services*`); otherwise GKE adds ranges from `pods_cidr` and `services_cidr` |
-| `cluster` | platform | `create`, `existing` | `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate`; optional `workload_pool`, `node_service_account` |
-| `buckets` | platform | `create`, `existing` | `bucket_name`, `bucket_url`; optional `userdata_bucket_name`, `userdata_bucket_url` |
-| `dns` | platform | `managed`, `certificate`, `external` | `certificate_map_name`, `certificate_id` (for `certificate`) |
-| `storage` | app | `filestore`, `existing`, `incluster` | `filestore_id`, `filestore_ip`, `filestore_share` (for `existing`) |
+| `network` | platform | `create`, `existing` | `vpc_id` (the VPC; global), `subnet_id` (the node subnet in the region) and that subnet's `pods_range_name` and `services_range_name` (secondary ranges picked in the wizard; the subnet must already have both, since an adopted subnet is never modified) |
+| `cluster` | platform | `create`, `existing` | `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate`; optional `workload_pool`, `node_service_account`, `network_id` (the cluster's VPC, checked against `network`) |
+| `buckets` | platform | `create`, `existing` | `bucket_name`, `bucket_arn` (its `gs://` URL); optional `userdata_bucket_name`, `userdata_bucket_arn` |
+| `dns` | platform | `managed`, `certificate`, `external` | `certificate_map_name`, `certificate_arn` (the certificate ID); optional `certificate_validation_records`, `dns_zone_name`, `dns_zone_project` (for `certificate`) |
+| `storage` | app | `filestore`, `existing`, `incluster` | `filestore_ip`, `filestore_share` (for `existing`) |
 | `helpdesk` | app | `create` | none |
+
+Everything runs on the `network` layer's VPC: Filestore attaches to it and the nodes live in it. So an adopted
+cluster needs `network.mode = "existing"` with the cluster's own VPC (a validation rejects a new VPC, or a
+`cluster.provides.network_id` on another VPC), and an existing Filestore instance must be on that VPC. The
+DevKit wizard lists only the clusters and Filestore instances on the VPC picked in the Network step.
+
+Output and `provides` names follow `terraform-aws-helpdesk` where the concept is the same (`vpc_id`,
+`certificate_arn`, `bucket_arn`, `load_balancer_hostname`), even though the GCP values are a network path, a
+certificate ID, a `gs://` URL and an IP address. GCP-only values keep their own names.
 
 ### Other inputs
 
@@ -174,7 +184,10 @@ volume in every mode.
 | `incluster` | The chart's NFS server on a Persistent Disk (cheapest; one replica) | `nfs_server_disk_size` (default `50Gi`) |
 
 The Filestore StorageClass uses `reclaimPolicy: Retain`: destroying a deployment deletes the class but keeps the
-Filestore instance and its data, and the instance keeps billing until you delete it.
+Filestore instance and its data, and the instance keeps billing until you delete it. The instance is created by
+the CSI driver, not by Terraform, so it is not in state; the class labels it `duplocloud-deployment=<name>` and
+the app output `filestore_cleanup` is the command that lists it (see
+[Destroying a deployment](#destroying-a-deployment)).
 
 ### DNS and certificate
 
@@ -191,9 +204,18 @@ It sets only what differs from the chart defaults (GCP settings, Workload Identi
 the Bitnami subchart) and renders the storage block for the selected `storage.mode`. Secrets never appear in
 it: they reach Helm through `set_sensitive`.
 
-Chart-managed Filestore needs a chart with the `filestore.*` values. Until
-[helpdesk-helm](https://github.com/duplocloud-internal/helpdesk-helm) releases it, the default
-`chart_version` is the `feature/filestore-backend` build `0.2.24-feature-filestore-backend-09fe37e`.
+As on AWS, it turns on the web terminal (`xterm`, at `deployment.xterm_host`), fixes the MongoDB database name
+(`duplo-ai-helpdesk`), turns off the MongoDB sub-chart's backup (its claim collides with the chart's own on
+chart 0.2.19+), and renders the Slack backend when `helpdesk.values.slack_backend_enabled` is true (tokens
+through `secrets`). The chart's own nightly MongoDB dump keeps its default volume, a Persistent Disk in the
+cluster's default class, never a Filestore instance.
+
+Chart-managed Filestore needs a chart with the `filestore.*` values
+([helpdesk-helm#100](https://github.com/duplocloud-internal/helpdesk-helm/pull/100), `feature/filestore-backend`).
+Until it is merged and released, the module default `chart_version` is that branch's build
+`0.2.24-feature-filestore-backend-09fe37e`; the DevKit wizard already asks for `0.2.24`. Once the release that
+includes it is out, the module default moves to it (a release of this repo) and the two agree again. With a
+chart that has no `filestore.*` values, use the `existing` or `incluster` storage mode.
 
 ## Resource naming
 
@@ -229,13 +251,24 @@ full name.
 
 | Root | Outputs |
 |---|---|
-| `platform` | `name_prefix`, `network_name`, `network_id`, `subnet_id`, `pods_range_name`, `services_range_name`, `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate`, `workload_pool`, `node_service_account`, `bucket_name`, `bucket_url`, `userdata_bucket_name`, `userdata_bucket_url`, `certificate_id`, `certificate_map_name`, `certificate_validation_records`, `dns_zone_name`, `dns_zone_project`, `dns_mode` |
-| `app` | `helpdesk_url`, `gateway_ip`, `dns_records` (A records to create when DNS is not managed), `storage_class_name`, `release`, and the sensitive `secrets` and `generated` |
+| `platform` | `name_prefix`, `network_name`, `vpc_id`, `subnet_id`, `pods_range_name`, `services_range_name`, `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate`, `workload_pool`, `node_service_account`, `bucket_name`, `bucket_arn`, `userdata_bucket_name`, `userdata_bucket_arn`, `certificate_arn`, `certificate_map_name`, `certificate_validation_records`, `dns_zone_name`, `dns_zone_project`, `dns_mode` |
+| `app` | `helpdesk_url`, `load_balancer_hostname` (the Gateway IP), `dns_records` (A records to create when DNS is not managed), `storage_class_name`, `filestore_cleanup`, `release`, and the sensitive `secrets` and `generated` |
 
 ## Destroying a deployment
 
 Destroy in reverse order: `app`, then `platform`. Adopted resources are left untouched, and the Filestore
-instance of `filestore` mode is kept (see [Shared storage](#shared-storage)).
+instance of `filestore` mode is kept (see [Shared storage](#shared-storage)). Once its data is no longer needed,
+find it and delete it:
+
+```bash
+tofu -chdir=app output -raw filestore_cleanup   # before destroying app; or run the command it prints:
+gcloud filestore instances list --project <project> --filter='labels.duplocloud-deployment=<name>'
+gcloud filestore instances delete <instance> --location <zone> --project <project>
+```
+
+State from the repository's original `terraform/` layout cannot be migrated: the roots, modules and inputs were
+rebuilt, and the code carries no `moved`, `import` or `removed` blocks. Destroy a deployment made with the old
+layout with that code, then deploy it again with this one.
 
 If deleting the VPC fails with `already being used by ... networkEndpointGroups/k8s1-...`, delete the
 leftover network endpoint groups and retry:
@@ -247,7 +280,11 @@ gcloud compute network-endpoint-groups list --filter='network~/<cluster_name>-vp
 ## Security
 
 - Private nodes with no external IPs; egress through Cloud NAT. Custom-mode VPC with no default allow rules.
-- Workload Identity for every workload; no service account keys.
+- Workload Identity for every workload; no service account keys. The same grants as on AWS: the agent gets
+  `roles/aiplatform.user` (Bedrock on AWS), the backend gets no project role, only object access to its two buckets.
+  It reaches a customer's project by impersonating a service account listed in
+  `helpdesk.values.backend_impersonate_service_accounts` (the AWS backend assumes a role the target account trusts).
+  Neither gets project-wide token creator.
 - HTTPS-only Gateway with a TLS 1.2+ `MODERN` SSL policy and a Google-managed certificate.
 - Hardened GKE: Shielded nodes on Container-Optimized OS, kubelet read-only port off, insecure RBAC bindings
   blocked, optional CMEK for Secrets (`cluster.values.cmek_key`), optional authorized networks.

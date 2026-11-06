@@ -16,11 +16,42 @@ variable "deployment" {
 variable "network" {
   description = "Network layer (module vpc)"
   type        = any
+
+  # An adopted network names the VPC, the node subnet and the subnet's Pod and Service ranges (picked in the wizard).
+  validation {
+    condition = try(var.network.mode, "") == "create" || alltrue([
+      for k in ["vpc_id", "subnet_id", "pods_range_name", "services_range_name"] : try(coalesce(var.network.provides[k]), "") != ""
+    ])
+    error_message = "network.mode \"existing\" needs network.provides.vpc_id, subnet_id, pods_range_name and services_range_name (the node subnet and its Pod and Service secondary ranges)."
+  }
+
+  validation {
+    # Missing ranges (absent, null or "") are reported by the validation above; this one only compares two picked ranges.
+    condition = (try(var.network.mode, "") == "create" || try(coalesce(var.network.provides.pods_range_name), "") == ""
+    || try(coalesce(var.network.provides.pods_range_name), "") != try(coalesce(var.network.provides.services_range_name), ""))
+    error_message = "network.provides.pods_range_name and services_range_name must be two different secondary ranges of the subnet."
+  }
+
+  validation {
+    condition     = try(var.network.mode, "") == "create" || can(regex("^projects/[^/]+/regions/[^/]+/subnetworks/[^/]+$", var.network.provides.subnet_id))
+    error_message = "network.provides.subnet_id must be a subnet path: projects/<project>/regions/<region>/subnetworks/<name>."
+  }
 }
 
 variable "cluster" {
   description = "Cluster layer (module gke)"
   type        = any
+
+  # An adopted cluster must be on the Network layer's VPC: Filestore and the Gateway attach to that VPC. The wizard
+  # lists only those clusters and sends the cluster's VPC as provides.network_id; this checks it when present (inputs
+  # saved by an older release have none and plan as before).
+  validation {
+    condition = (try(var.cluster.mode, "") != "existing" || try(var.cluster.provides.network_id, "") == "" || (
+      try(var.network.mode, "") != "create"
+      && try(regex("projects/.+", var.cluster.provides.network_id), var.cluster.provides.network_id) == try(regex("projects/.+", var.network.provides.vpc_id), "")
+    ))
+    error_message = "An adopted cluster must be on the network layer's VPC: use network.mode \"existing\" with network.provides.vpc_id equal to cluster.provides.network_id."
+  }
 }
 
 variable "buckets" {

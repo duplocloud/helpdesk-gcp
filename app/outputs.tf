@@ -8,8 +8,8 @@ locals {
   ]
 }
 
-output "gateway_ip" {
-  description = "IP address of the external Gateway; both hostnames point here"
+output "load_balancer_hostname" {
+  description = "IP address of the external Gateway (named as on AWS, where it is the ALB hostname); both hostnames point here"
   value       = local.gateway_ip
 }
 
@@ -46,4 +46,9 @@ output "storage_class_name" {
 output "release" {
   description = "Helm release of Helpdesk: name, namespace and chart version"
   value       = { name = module.helpdesk.release_name, namespace = module.helpdesk.namespace, chart_version = module.helpdesk.chart_version }
+}
+
+output "filestore_cleanup" {
+  description = "Filestore mode: a destroy keeps the Filestore instance (and its data, and its bill); this command lists it so it can be deleted (null in other modes)"
+  value       = module.storage.filestore_cleanup
 }

@@ -163,7 +163,7 @@ run "external_dns_lists_a_records" {
     error_message = "External DNS lists A records for both hostnames."
   }
   assert {
-    condition     = output.gateway_ip == "34.120.0.10"
+    condition     = output.load_balancer_hostname == "34.120.0.10"
     error_message = "The gateway IP is an output."
   }
   assert {
@@ -304,4 +304,128 @@ run "rejects_bad_storage_mode" {
   }
 
   expect_failures = [var.storage]
+}
+
+run "values_match_aws" {
+  command = plan
+
+  assert {
+    condition = (
+      yamldecode(module.helpdesk.values).xterm.enabled == true
+      && yamldecode(module.helpdesk.values).config.mongoDbDatabaseName == "duplo-ai-helpdesk"
+      && yamldecode(module.helpdesk.values).config.aiStudioIsMasterDisabled == true
+      && yamldecode(module.helpdesk.values).mongodb.backup.enabled == false
+    )
+    error_message = "As on AWS: the web terminal runs, the database name is fixed, and the MongoDB sub-chart backup is off."
+  }
+  assert {
+    condition     = !can(yamldecode(module.helpdesk.values).mongodbBackup)
+    error_message = "The chart's MongoDB dump keeps its own claim on the default Persistent Disk class (no Filestore instance, nothing orphaned on upgrade)."
+  }
+  assert {
+    condition     = yamldecode(module.helpdesk.values).slackBackend == { enabled = false }
+    error_message = "Slack is off by default."
+  }
+}
+
+run "slack_backend" {
+  command = plan
+
+  variables {
+    helpdesk = { mode = "create", values = {
+      local_admin_email                = "admin@example.com"
+      slack_backend_enabled            = true
+      slack_backend_image_tag          = "1.2.3"
+      slack_helpdesk_default_agent     = "support"
+      slack_helpdesk_default_workspace = "acme"
+      slack_app_portals                = "[{\"portal\":\"acme\"}]"
+    }, provides = {} }
+    secrets = { local_admin_password = "correct-horse-battery", slack_app_token = "xapp-test", slack_bot_token = "xoxb-test" }
+  }
+
+  assert {
+    condition = (
+      yamldecode(module.helpdesk.values).slackBackend.enabled == true
+      && yamldecode(module.helpdesk.values).slackBackend.image.tag == "1.2.3"
+      && yamldecode(module.helpdesk.values).slackBackend.env == { helpdeskDefaultAgent = "support", helpdeskDefaultWorkspace = "acme" }
+      && yamldecode(module.helpdesk.values).slackBackend.envFromSecret.data.DUPLO_SLACK_APP_PORTALS == "[{\"portal\":\"acme\"}]"
+    )
+    error_message = "Enabling Slack renders the Slack backend as on AWS."
+  }
+  assert {
+    condition     = !strcontains(module.helpdesk.values, "xoxb-test") && !strcontains(module.helpdesk.values, "xapp-test")
+    error_message = "The Slack tokens never appear in the values document; they go through set_sensitive."
+  }
+}
+
+run "adopted_bucket_without_arn" {
+  command = plan
+
+  override_data {
+    target = data.terraform_remote_state.platform
+    values = {
+      outputs = {
+        cluster_endpoint       = "203.0.113.10"
+        cluster_ca_certificate = "Q0E="
+        network_name           = "hd-vpc"
+        bucket_name            = "corp-data"
+        bucket_arn             = null
+        userdata_bucket_name   = ""
+        userdata_bucket_arn    = ""
+        certificate_map_name   = "certmap-hd-helpdesk"
+        dns_mode               = "external"
+      }
+    }
+  }
+
+  assert {
+    condition     = strcontains(module.helpdesk.release_name, "duplo-ai-helpdesk")
+    error_message = "The app root plans with adopted buckets that have no ARN and no user data bucket."
+  }
+}
+
+run "dns_records_empty_until_lb_known" {
+  command = apply
+
+  override_resource {
+    target = module.helpdesk.google_compute_global_address.gateway
+    values = { address = "" }
+  }
+
+  assert {
+    condition     = output.load_balancer_hostname == "" && length(output.dns_records) == 0
+    error_message = "dns_records must be empty until the Gateway IP is known."
+  }
+}
+
+run "backend_impersonation_accepts_service_account_emails" {
+  command = plan
+
+  variables {
+    helpdesk = { mode = "create", values = { local_admin_email = "admin@example.com", backend_impersonate_service_accounts = [
+      "helpdesk-reader@acme-prod.iam.gserviceaccount.com",
+      "123456789012-compute@developer.gserviceaccount.com",
+      "acme-prod@appspot.gserviceaccount.com",
+    ] }, provides = {} }
+  }
+}
+
+run "backend_impersonation_rejects_other_text" {
+  command = plan
+
+  variables {
+    helpdesk = { mode = "create", values = { local_admin_email = "admin@example.com", backend_impersonate_service_accounts = ["projects/acme-prod/serviceAccounts/x"] }, provides = {} }
+  }
+
+  expect_failures = [var.helpdesk]
+}
+
+run "backend_impersonation_rejects_a_bare_domain" {
+  command = plan
+
+  variables {
+    helpdesk = { mode = "create", values = { local_admin_email = "admin@example.com", backend_impersonate_service_accounts = ["reader@gserviceaccount.com"] }, provides = {} }
+  }
+
+  expect_failures = [var.helpdesk]
 }

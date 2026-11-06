@@ -7,20 +7,19 @@ resource "google_container_cluster" "this" {
   project  = var.project_id
   location = var.region
 
-  # Replaced by the node pool below.
-  remove_default_node_pool = true
-  initial_node_count       = 1
+  # No default node pool; the node pool below runs the workloads. Newer GKE creates the cluster without one, older
+  # GKE needs the deprecated create-then-remove (local.no_default_pool). Both are create-time only (ignored below).
+  remove_default_node_pool = local.no_default_pool ? null : true
+  initial_node_count       = local.no_default_pool ? 0 : 1
 
   network    = var.network_id
   subnetwork = var.subnet_id
 
   networking_mode = "VPC_NATIVE"
-  # Named ranges are used as-is; otherwise GKE creates them on the subnet from the CIDRs.
+  # The node subnet's secondary ranges (created by the vpc module, or picked on an adopted subnet).
   ip_allocation_policy {
     cluster_secondary_range_name  = var.pods_range_name
     services_secondary_range_name = var.services_range_name
-    cluster_ipv4_cidr_block       = var.pods_range_name == null ? var.pods_cidr : null
-    services_ipv4_cidr_block      = var.services_range_name == null ? var.services_cidr : null
   }
 
   release_channel {
@@ -143,12 +142,13 @@ resource "google_container_cluster" "this" {
     }
   }
 
-  resource_labels = merge(var.labels, { component = "kubernetes-engine" })
+  resource_labels = { component = "kubernetes-engine" }
 
   deletion_protection = var.deletion_protection
 
+  # Create-time settings: a cluster created either way must not show a diff when the channel's default moves on.
   lifecycle {
-    ignore_changes = [initial_node_count]
+    ignore_changes = [initial_node_count, remove_default_node_pool]
   }
 
   depends_on = [google_kms_crypto_key_iam_member.cmek]
