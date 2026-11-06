@@ -1,244 +1,321 @@
-# DuploCloud AI Helpdesk on GCP
+# terraform-google-helpdesk
 
-Terraform that deploys [DuploCloud AI Helpdesk](https://duplocloud.com) into your own Google Cloud
-project with a single `terraform apply`. You provide a GCP project, two hostnames, a Google OAuth
-client and a MongoDB password; Terraform builds everything else and gives you a working HTTPS URL.
+OpenTofu / Terraform code that deploys [DuploCloud](https://duplocloud.com) **Helpdesk** into your own Google Cloud
+project: a VPC, a private GKE cluster, shared storage, Cloud Storage buckets, a Google-managed certificate
+with DNS, and the Helpdesk Helm release behind a Gateway API load balancer.
 
-> **GKE Standard only.** The stack creates a regional GKE Standard cluster. Autopilot is not supported.
+Every layer can be **created** or can **adopt** something you already have: an existing VPC and subnet,
+GKE cluster, Filestore instance, bucket or certificate map. Adopted resources are read, never modified, so
+the same code serves a new project (greenfield) and one with an established platform (brownfield).
 
-## What gets deployed
+The repository works on its own, and it is also what the DuploCloud DevKit's Cloud Deployment agent runs. It was
+first published as `duplocloud/helpdesk-gcp`; GitHub redirects the old name.
+It follows the same layout and contract as
+[`terraform-aws-helpdesk`](https://github.com/duplocloud/terraform-aws-helpdesk).
 
-- A custom VPC with one private subnet and Cloud NAT for egress
-- A regional **GKE Standard** cluster with private nodes and an autoscaling node pool across all zones
-- A global external Application Load Balancer (GKE Gateway API) on a reserved IP, with a
-  Google-managed Certificate Manager certificate and DNS records in your Cloud DNS zone (or records
-  to create elsewhere)
-- Storage: Persistent Disks for application data and MongoDB
-- The Helpdesk application (Helm chart `oci://quay.io/duplocloud/helpdesk`), using Vertex AI for AI
-  features
-- Workload Identity for every workload (no service account keys), plus control-plane and audit logging
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Repository layout](#repository-layout)
+- [Configuration](#configuration)
+- [Resource naming](#resource-naming)
+- [Outputs](#outputs)
+- [Destroying a deployment](#destroying-a-deployment)
+- [Security](#security)
+- [Tests](#tests)
+- [Contributing](#contributing)
+- [Terraform and OpenTofu](#terraform-and-opentofu)
+- [License](#license)
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph platform["platform root (Google Cloud APIs)"]
+    vpc["network<br/>VPC, subnet, NAT"] --> gke["cluster<br/>GKE Standard"]
+    gcs["buckets<br/>Cloud Storage"]
+    dns["dns<br/>certificate, map, records"]
+  end
+  subgraph app["app root (Kubernetes and Helm)"]
+    storage["storage<br/>Filestore or NFS"] --> helpdesk["helpdesk<br/>Helm release, Gateway"]
+  end
+  platform -- "remote state (GCS)" --> app
+```
+
+| Layer | Root | Module | Creates | AWS counterpart |
+|---|---|---|---|---|
+| `network` | platform | `vpc` | VPC, node subnet with Pod and Service ranges, proxy-only subnet, Cloud Router and NAT, firewall | `vpc` |
+| `cluster` | platform | `gke` | Regional GKE Standard with private nodes, Workload Identity, Filestore CSI driver, node pool | `eks` |
+| `buckets` | platform | `gcs` | App-data and user-data buckets (uniform access, public access prevented) | `s3` |
+| `dns` | platform | `dns` | Certificate Manager certificate and map, DNS authorizations, Cloud DNS records | `dns` |
+| `storage` | app | `storage` | The Filestore StorageClass, or the NFS provisioner for an existing Filestore share (in-cluster NFS is the chart's) | `efs` + `addons` (shared files) |
+| `helpdesk` | app | `helpdesk` | Namespace, Workload Identity service accounts, gateway IP, SSL policy, A records, Helm release | `helpdesk` |
+
+There are two roots because the `app` root configures its Kubernetes and Helm providers from a cluster that
+must already exist. Apply `platform` first, then `app`; `app` reads the platform outputs from the platform
+state with `terraform_remote_state`.
+
+## Requirements
+
+- OpenTofu 1.10 or later (CI and the DevKit agent run 1.13). Terraform 1.10+ also works but is not tested here.
+- A GCS bucket for state. The agent uses `duplo-helpdesk-tfstate-<project_id>`, versioned, with uniform
+  access.
+- A DuploCloud Helpdesk license token.
+- Google credentials for the target project with these roles:
+
+| Role | Needed for |
+|---|---|
+| `roles/serviceusage.serviceUsageAdmin` | Enabling the required APIs |
+| `roles/compute.admin` | VPC, subnets, router, NAT, firewall, reserved IP, SSL policy |
+| `roles/container.admin` | GKE cluster and node pool, Kubernetes and Helm resources (also on an adopted cluster) |
+| `roles/file.editor` | The Filestore instance the CSI driver creates (`filestore` storage mode) |
+| `roles/storage.admin` | Helpdesk buckets and their IAM |
+| `roles/iam.serviceAccountAdmin` | Node and workload service accounts, Workload Identity bindings |
+| `roles/iam.serviceAccountUser` | Attaching the node service account to the node pool |
+| `roles/resourcemanager.projectIamAdmin` | Project IAM bindings for those service accounts |
+| `roles/dns.admin` | Records in the Cloud DNS zone (on the zone's project) |
+| `roles/certificatemanager.owner` | Certificate, DNS authorizations, certificate map |
+
+## Quick start
+
+Example inputs for a new project are in [`examples/greenfield/`](examples/greenfield/). Replace
+`my-gcp-project`, the hostnames and the Cloud DNS zone with your own.
+
+```bash
+# 1. platform
+cd platform
+cat > backend.hcl <<EOF
+bucket = "duplo-helpdesk-tfstate-my-gcp-project"
+prefix = "deployments/hd/platform"
+EOF
+tofu init -backend-config=backend.hcl
+tofu plan -var-file=../examples/greenfield/platform.tfvars.json -out=platform.tfplan
+tofu apply platform.tfplan
+
+# 2. app
+cd ../app
+sed 's#/platform"#/app"#' ../platform/backend.hcl > backend.hcl
+tofu init -backend-config=backend.hcl
+export TF_VAR_secrets='{"licensing_token":"...","local_admin_password":"..."}'
+tofu plan -var-file=../examples/greenfield/app.tfvars.json -out=app.tfplan
+tofu apply app.tfplan
+tofu output helpdesk_url
+```
+
+With `dns` mode `external`, create the records in the platform output `certificate_validation_records`
+before step 2 and wait until the certificate is active:
+
+```bash
+gcloud certificate-manager certificates describe hd-gke-cert --format='value(managed.state)'
+```
 
 ## Repository layout
 
 ```
-.
-├── README.md                      ← you are here
-├── docs/
-│   ├── VARIABLES.md               All Terraform input variables and outputs
-│   └── ARCHITECTURE.md            Architecture deep-dive, security controls, IAM
-└── terraform/
-    ├── README.md                  Terraform operations guide
-    ├── main.tf                    Module wiring
-    ├── services.tf                Required GCP API enablement
-    ├── providers.tf               google / helm / kubernetes providers
-    ├── locals.tf                  Derived locals
-    ├── variables.tf               All input variables
-    ├── outputs.tf                 All outputs
-    ├── versions.tf                Terraform + provider version pins
-    ├── backend.tf.example         GCS remote state template → copy to backend.tf
-    ├── terraform.tfvars.example   Variable template → copy to terraform.tfvars
-    ├── values-override.example.yml Helm chart values template → copy to values-override.yml
-    └── modules/
-        ├── network/               VPC, subnets, Cloud NAT, Private Service Access, firewall
-        ├── kubernetes-engine/     Regional GKE Standard cluster + node pool
-        ├── load-balancer/         Reserved IP, Certificate Manager, SSL policy, DNS
-        └── helpdesk/              Workload Identity GSAs, Kubernetes namespace, Helm release
+platform/            root 1: everything created through the Google Cloud APIs (state prefix .../platform)
+app/                 root 2: everything created through the Kubernetes API (state prefix .../app)
+modules/
+  vpc/               network layer
+  gke/               cluster layer
+  gcs/               buckets layer
+  dns/               dns layer
+  storage/           storage layer
+  helpdesk/          helpdesk layer; templates/values.yml.tftpl holds the Helm values
+examples/greenfield/ example inputs for both roots
 ```
 
-## Prerequisites
-
-### Tools
-
-| Tool | Version |
-|------|---------|
-| [Terraform](https://developer.hashicorp.com/terraform/install) | ≥ 1.9 |
-| [gcloud CLI](https://cloud.google.com/sdk/docs/install) | latest |
-| [kubectl](https://kubernetes.io/docs/tasks/tools/) | ≥ 1.27 (optional, for inspection) |
-
-### GCP resources
-
-1. **A GCP project** with billing enabled and a principal (user or service account) that has the roles
-   listed in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#iam-roles-required-to-deploy).
-   The required APIs are enabled for you by `services.tf`.
-
-2. **DNS for two hostnames**, e.g. `helpdesk.example.com` and `helpdesk-xterm.example.com`.
-   Either a public **Cloud DNS managed zone** (Terraform creates the records), or any other DNS
-   provider (you create the records from `terraform output dns_records`).
-
-3. **A Google OAuth client** for sign-in. In Google Cloud Console →
-   *APIs & Services* → *Credentials* → *Create credentials* → *OAuth 2.0 Client ID* → *Web application*:
-   - Authorized JavaScript origin: `https://helpdesk.example.com`
-   - Authorized redirect URI: `https://helpdesk.example.com/signin-google`
-
-   Microsoft Entra ID is also supported; see
-   [`values-override.example.yml`](terraform/values-override.example.yml).
-
-4. **A GCS bucket for Terraform state** (created in step 1 of the quick start below).
-
-5. **Anthropic models enabled in Vertex AI Model Garden** (optional)
-
-## Quick start
-
-```bash
-# 1. Clone the repo and enter the terraform directory
-git clone https://github.com/duplocloud/helpdesk-gcp.git
-cd helpdesk-gcp/terraform
-
-# 2. Authenticate
-gcloud auth application-default login
-
-# 3. Create the state bucket (once per project)
-gcloud storage buckets create gs://helpdesk-tfstate-<project_id> \
-  --location=<region> \
-  --uniform-bucket-level-access \
-  --public-access-prevention
-gcloud storage buckets update gs://helpdesk-tfstate-<project_id> --versioning
-
-# 4. Configure Terraform backend
-cp backend.tf.example backend.tf
-# Edit backend.tf: set bucket = "helpdesk-tfstate-<project_id>"
-
-# 5. Configure infrastructure variables
-cp terraform.tfvars.example terraform.tfvars
-```
-
-Edit `terraform.tfvars` — these four lines are the minimum:
-
-```hcl
-project_id         = "my-gcp-project"
-region             = "us-central1"
-helpdesk_dns       = "helpdesk.example.com"
-helpdesk_xterm_dns = "helpdesk-xterm.example.com"
-
-dns_managed_zone          = "example-com"       # Cloud DNS zone NAME; omit if DNS is elsewhere
-helm_values_override_file = "values-override.yml"
-```
-
-```bash
-# 6. Configure Helm chart values (app secrets)
-cp values-override.example.yml values-override.yml
-```
-
-Edit `values-override.yml` — the minimum required keys:
-
-```yaml
-mongodb:
-  auth:
-    rootPassword: "..."              # openssl rand -base64 32
-
-secrets:
-  googleClientId: "1234-abc.apps.googleusercontent.com"
-  googleClientSecret: "GOCSPX-..."
-
-config:
-  authSuperUsers: "you@example.com"  # your admin e-mail
-```
-
-```bash
-# 7. Initialize and deploy
-terraform init \
-  -backend-config="bucket=helpdesk-tfstate-<project_id>" \
-  -backend-config="prefix=helpdesk-gcp"
-
-terraform apply
-```
-
-`apply` returns once the Helm release is submitted. The certificate and load balancer take a
-further **10–20 minutes** to become active. Then open `https://helpdesk.example.com` and sign in
-with Google.
-
-### Verify the deployment
-
-```bash
-gcloud container clusters get-credentials \
-  "$(terraform output -raw gke_cluster_name)" \
-  --region <region> --project my-gcp-project
-
-kubectl get pods,gateway -n duplo-helpdesk
-
-# Check certificate provisioning status (replace <prefix> with your prefix value)
-gcloud certificate-manager certificates describe cert-<prefix>-helpdesk \
-  --format='value(managed.state)'
-```
+Each root has its own `tests/` (mock providers) and a committed `.terraform.lock.hcl`.
 
 ## Configuration
 
-Two files, two purposes:
+### Layer inputs
 
-- **`terraform.tfvars`** — infrastructure settings: project, region, network CIDRs, cluster size, DNS,
-  chart version. See [docs/VARIABLES.md](docs/VARIABLES.md) for the full reference and
-  [`terraform.tfvars.example`](terraform/terraform.tfvars.example) for defaults.
-
-- **`values-override.yml`** — Helm chart values applied on top of
-  `modules/helpdesk/values/default.yml`: MongoDB password, sign-in providers, super-users, Slack and
-  any other chart setting. See [`values-override.example.yml`](terraform/values-override.example.yml).
-
-Values that Terraform derives from the infrastructure (hostnames, Gateway IP, certificate map,
-Workload Identity annotations) **cannot** be overridden from the values file.
-
-## Terraform state and secrets
-
-State lives in the GCS bucket you pass to `terraform init`.
-
-`terraform.tfvars` and `values-override.yml` contain secrets — **don't commit them** (both are in
-`.gitignore`). Keep a copy somewhere safe; you need them to update or destroy the stack.
-
-## Telemetry
-
-The analytics collector is enabled by default. It reports product usage and billing
-for this Helpdesk instance to the DuploCloud control plane. It reports under `var.prefix`
-by default, or you can set a custom identifier:
+Both roots take one object per layer:
 
 ```hcl
-helpdesk_analytics_collector_app_instance = "my-helpdesk"   # default: var.prefix
+network = {
+  mode     = "create"   # or an adopt mode, e.g. "existing"
+  values   = { ... }    # optional module arguments, by variable name
+  provides = { ... }    # for adopt modes: the adopted resource's identifiers
+}
 ```
 
-To opt out:
+With a create mode the layer's module runs, and `values` overrides its defaults; every module variable has
+a default, so `values = {}` works. With an adopt mode the module is not instantiated and the root uses
+`provides` instead. `modules/*/variables.tf` lists every value a layer accepts, with its description and
+default.
 
-```hcl
-helpdesk_analytics_collector_enabled = false
-```
+| Layer | Root | Modes | `provides` for adopt modes |
+|---|---|---|---|
+| `network` | platform | `create`, `existing` | `vpc_id` (the VPC; global), `subnet_id` (the node subnet in the region) and that subnet's `pods_range_name` and `services_range_name` (secondary ranges picked in the wizard; the subnet must already have both, since an adopted subnet is never modified) |
+| `cluster` | platform | `create`, `existing` | `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate`; optional `workload_pool`, `node_service_account`, `network_id` (the cluster's VPC, checked against `network`) |
+| `buckets` | platform | `create`, `existing` | `bucket_name`, `bucket_arn` (its `gs://` URL); optional `userdata_bucket_name`, `userdata_bucket_arn` |
+| `dns` | platform | `managed`, `certificate`, `external` | `certificate_map_name`, `certificate_arn` (the certificate ID); optional `certificate_validation_records`, `dns_zone_name`, `dns_zone_project` (for `certificate`) |
+| `storage` | app | `filestore`, `existing`, `incluster` | `filestore_ip`, `filestore_share` (for `existing`) |
+| `helpdesk` | app | `create` | none |
 
-## Cost
+Everything runs on the `network` layer's VPC: Filestore attaches to it and the nodes live in it. So an adopted
+cluster needs `network.mode = "existing"` with the cluster's own VPC (a validation rejects a new VPC, or a
+`cluster.provides.network_id` on another VPC), and an existing Filestore instance must be on that VPC. The
+DevKit wizard lists only the clusters and Filestore instances on the VPC picked in the Network step.
 
-Main costs with the defaults: GKE cluster management fee, up to three `e2-standard-4` nodes
-(the pool scales to zero when idle — set `node_min ≥ 1` for always-on capacity), Cloud NAT,
-the global load balancer, and Persistent Disks. Vertex AI model usage is billed per token on top.
-Check current pricing for your region.
+Output and `provides` names follow `terraform-aws-helpdesk` where the concept is the same (`vpc_id`,
+`certificate_arn`, `bucket_arn`, `load_balancer_hostname`), even though the GCP values are a network path, a
+certificate ID, a `gs://` URL and an IP address. GCP-only values keep their own names.
 
-## Removing everything
+### Other inputs
 
-The load balancer tears down asynchronously. Follow this order to avoid a failed destroy:
+| Input | Root | Description |
+|---|---|---|
+| `deployment` | both | `{ name, region, host, xterm_host, account_id }`: `account_id` is the project ID; `host` and `xterm_host` are the Helpdesk hostnames |
+| `state` | app | `{ bucket, region, platform_key }`: `platform_key` is the platform root's state prefix, e.g. `deployments/<name>/platform` |
+| `secrets` | app | Sensitive map: `licensing_token` and `local_admin_password` (sign-in is the local admin, `helpdesk.values.local_admin_email`; Google and Microsoft sign-in are not supported); optional `slack_app_token`, `slack_bot_token`. Pass it as `TF_VAR_secrets` so it never lands in a file |
+| `common_tags` | both | Labels for every resource (lowercase keys and values) |
+
+### Shared storage
+
+`storage.mode` chooses where Helpdesk keeps its files. The backend and the agent share one ReadWriteMany
+volume in every mode.
+
+| Mode | What runs | Settings (`storage.values`) |
+|---|---|---|
+| `filestore` (default) | Terraform creates a Basic HDD Filestore StorageClass that the Helm chart uses; the GKE Filestore CSI driver creates **one** instance when the backend volume binds | `filestore_size` (default `100Gi`, the Basic HDD minimum) |
+| `existing` | nfs-subdir-external-provisioner serves subdirectories of an existing Filestore share | the picked instance's IP and share, in `provides` |
+| `incluster` | The chart's NFS server on a Persistent Disk (cheapest; one replica) | `nfs_server_disk_size` (default `50Gi`) |
+
+The Filestore StorageClass uses `reclaimPolicy: Retain`: destroying a deployment deletes the class but keeps the
+Filestore instance and its data, and the instance keeps billing until you delete it. The instance is created by
+the CSI driver, not by Terraform, so it is not in state; the class labels it `duplocloud-deployment=<name>` and
+the app output `filestore_cleanup` is the command that lists it (see
+[Destroying a deployment](#destroying-a-deployment)).
+
+### DNS and certificate
+
+| Mode | Behaviour |
+|---|---|
+| `managed` | Creates the certificate with DNS authorizations and writes the validation and A records in the Cloud DNS zone `values.dns_zone_name` |
+| `certificate` | Uses an existing Certificate Manager map; you manage its certificate and records |
+| `external` | Creates the certificate; you create the validation records (`certificate_validation_records`) and the A records (`dns_records`) in your DNS |
+
+### Helm values
+
+The Helpdesk values are one template, [`modules/helpdesk/templates/values.yml.tftpl`](modules/helpdesk/templates/values.yml.tftpl).
+It sets only what differs from the chart defaults (GCP settings, Workload Identity, the Gateway, MongoDB on
+the Bitnami subchart) and renders the storage block for the selected `storage.mode`. Secrets never appear in
+it: they reach Helm through `set_sensitive`.
+
+As on AWS, it turns on the web terminal (`xterm`, at `deployment.xterm_host`), fixes the MongoDB database name
+(`duplo-ai-helpdesk`), turns off the MongoDB sub-chart's backup (its claim collides with the chart's own on
+chart 0.2.19+), and renders the Slack backend when `helpdesk.values.slack_backend_enabled` is true (tokens
+through `secrets`). The chart's own nightly MongoDB dump keeps its default volume, a Persistent Disk in the
+cluster's default class, never a Filestore instance.
+
+Chart-managed Filestore needs a chart with the `filestore.*` values
+([helpdesk-helm#100](https://github.com/duplocloud-internal/helpdesk-helm/pull/100), `feature/filestore-backend`).
+Until it is merged and released, the module default `chart_version` is that branch's build
+`0.2.24-feature-filestore-backend-09fe37e`; the DevKit wizard already asks for `0.2.24`. Once the release that
+includes it is out, the module default moves to it (a release of this repo) and the two agree again. With a
+chart that has no `filestore.*` values, use the `existing` or `incluster` storage mode.
+
+## Resource naming
+
+Names follow the AWS repo: one prefix, the cluster name (`cluster.values.cluster_name`, default
+`<deployment>-gke`), then the purpose. The prefix is the configured cluster name even when an existing
+cluster is adopted, so two deployments on one cluster never collide. Google Cloud limits name length (most
+resources 63 characters, node pools 40, service account IDs 30); a longer name keeps a short hash of the
+full name.
+
+| Resource | Name |
+|---|---|
+| VPC network | `<cluster_name>-vpc` |
+| Node subnet | `<cluster_name>-private` |
+| Pod and Service ranges | `<cluster_name>-pods`, `<cluster_name>-services` |
+| Proxy-only subnet | `<cluster_name>-proxy` |
+| Cloud Router and NAT | `<cluster_name>-router`, `<cluster_name>-nat` |
+| Static NAT IPs (optional) | `<cluster_name>-nat-ip-<n>` |
+| Firewall rule | `<cluster_name>-allow-internal` |
+| GKE cluster | `<cluster_name>` |
+| Node pool | `<cluster_name>-default-np` |
+| Node service account | `<cluster_name>-node` |
+| Buckets | `<deployment>-helpdesk-<project>`, `<deployment>-helpdesk-userdata-<project>` |
+| Certificate and map | `<cluster_name>-cert`, `<cluster_name>-certmap` |
+| Certificate map entries | `<cluster_name>-certmap-helpdesk`, `<cluster_name>-certmap-xterm` |
+| DNS authorizations | `<cluster_name>-dnsauth-helpdesk`, `<cluster_name>-dnsauth-xterm` |
+| Gateway IP and SSL policy | `<cluster_name>-gateway`, `<cluster_name>-ssl-policy` |
+| Workload service accounts | `<cluster_name>-backend`, `<cluster_name>-agent`, `<cluster_name>-collector` |
+| StorageClass | `<cluster_name>-filestore` (Filestore modes), `<cluster_name>-nfs` (in-cluster NFS) |
+| Helm release and namespace | `duplo-ai-helpdesk` in `helpdesk` (`helpdesk.values.namespace` overrides) |
+| Helpdesk Kubernetes resources | `<fullname>-...`, set as the chart's `fullnameOverride`: the release name, plus `-helpdesk` unless it contains it (the chart's own rule) |
+
+## Outputs
+
+| Root | Outputs |
+|---|---|
+| `platform` | `name_prefix`, `network_name`, `vpc_id`, `subnet_id`, `pods_range_name`, `services_range_name`, `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate`, `workload_pool`, `node_service_account`, `bucket_name`, `bucket_arn`, `userdata_bucket_name`, `userdata_bucket_arn`, `certificate_arn`, `certificate_map_name`, `certificate_validation_records`, `dns_zone_name`, `dns_zone_project`, `dns_mode` |
+| `app` | `helpdesk_url`, `load_balancer_hostname` (the Gateway IP), `dns_records` (A records to create when DNS is not managed), `storage_class_name`, `filestore_cleanup`, `release`, and the sensitive `secrets` and `generated` |
+
+## Destroying a deployment
+
+Destroy in reverse order: `app`, then `platform`. Adopted resources are left untouched, and the Filestore
+instance of `filestore` mode is kept (see [Shared storage](#shared-storage)). Once its data is no longer needed,
+find it and delete it:
 
 ```bash
-cd terraform
-
-# 1. Uninstall the Helm release
-terraform destroy -target=module.helpdesk.helm_release.helpdesk
-
-# 2. Destroy everything else
-terraform destroy
+tofu -chdir=app output -raw filestore_cleanup   # before destroying app; or run the command it prints:
+gcloud filestore instances list --project <project> --filter='labels.duplocloud-deployment=<name>'
+gcloud filestore instances delete <instance> --location <zone> --project <project>
 ```
 
-If the VPC deletion fails with `already being used by … networkEndpointGroups/k8s1-…`, delete those
-NEGs (`gcloud compute network-endpoint-groups list --filter='network~/<prefix>-vpc$'`) and retry.
+State from the repository's original `terraform/` layout cannot be migrated: the roots, modules and inputs were
+rebuilt, and the code carries no `moved`, `import` or `removed` blocks. Destroy a deployment made with the old
+layout with that code, then deploy it again with this one.
 
-## Troubleshooting
+If deleting the VPC fails with `already being used by ... networkEndpointGroups/k8s1-...`, delete the
+leftover network endpoint groups and retry:
 
-See [terraform/README.md](terraform/README.md#troubleshooting) for the full troubleshooting guide.
-Common first-run issues:
+```bash
+gcloud compute network-endpoint-groups list --filter='network~/<cluster_name>-vpc$'
+```
 
-| Symptom | Fix |
-|---------|-----|
-| `helm_values_override_file` validation error | File is missing, not valid YAML, or missing `mongodb.auth.rootPassword` |
-| `redirect_uri_mismatch` from Google | Redirect URI in the OAuth client must be exactly `https://<helpdesk_dns>/signin-google` |
-| HTTPS doesn't work right after apply | Certificate is provisioned asynchronously; check `managed.state` and wait for `ACTIVE` |
-| Terraform can't reach the cluster | Add your IP to `master_authorized_cidrs`, or set `gke_enable_dns_endpoint = true` |
-| Apply fails with an IAM error | IAM changes take time to propagate; re-run `terraform apply` |
+## Security
 
-## Further reading
+- Private nodes with no external IPs; egress through Cloud NAT. Custom-mode VPC with no default allow rules.
+- Workload Identity for every workload; no service account keys. The same grants as on AWS: the agent gets
+  `roles/aiplatform.user` (Bedrock on AWS), the backend gets no project role, only object access to its two buckets.
+  It reaches a customer's project by impersonating a service account listed in
+  `helpdesk.values.backend_impersonate_service_accounts` (the AWS backend assumes a role the target account trusts).
+  Neither gets project-wide token creator.
+- HTTPS-only Gateway with a TLS 1.2+ `MODERN` SSL policy and a Google-managed certificate.
+- Hardened GKE: Shielded nodes on Container-Optimized OS, kubelet read-only port off, insecure RBAC bindings
+  blocked, optional CMEK for Secrets (`cluster.values.cmek_key`), optional authorized networks.
+- Secrets enter only through the sensitive `secrets` variable; nothing is written to local files, and the
+  Helm values are passed in memory.
+- The JWT shared secret and the MongoDB root password are generated (`random_password`) and kept in state,
+  so protect the state bucket accordingly.
+- Provider versions and checksums are pinned by the committed `.terraform.lock.hcl` in each root.
 
-- [docs/VARIABLES.md](docs/VARIABLES.md) — every Terraform variable and output
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — architecture deep-dive, security controls, resource naming, cost breakdown
-- [terraform/README.md](terraform/README.md) — Terraform module layout, workload IAM, destroy order, troubleshooting
-- [CONTRIBUTING.md](CONTRIBUTING.md) — how to develop, lint and contribute changes
+## Tests
+
+```bash
+cd platform && tofu init -backend=false && tofu test
+cd ../app && tofu init -backend=false && tofu test
+```
+
+The tests use mock providers, cover every layer mode and need no Google Cloud project. CI also runs
+`tofu fmt -check` and `tflint --recursive`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Changes must keep existing deployments upgradeable; the rules are
+listed there.
+
+## Terraform and OpenTofu
+
+The code is Terraform-language configuration, so the familiar name is used for it. It is developed, tested
+(`tofu test`, CI) and run by the DevKit agent with **OpenTofu** (MPL-2.0), with providers from
+`registry.opentofu.org` (see the lock files). The repo needs no HashiCorp Terraform binary. Terraform is a
+trademark of HashiCorp.
+
+## License
+
+[Apache License 2.0](LICENSE), as [`terraform-aws-helpdesk`](https://github.com/duplocloud/terraform-aws-helpdesk).

@@ -1,14 +1,14 @@
-# macOS
-.DS_Store
-
-# Editor
-.vscode/
-.idea/
-
-# Terraform (handled by terraform/.gitignore, but cover root-level runs)
+.terraform/
 *.tfstate
 *.tfstate.*
-.terraform/
-errored.tfstate
-tfplan*
-*.log
+*.tfvars
+*.tfvars.json
+!examples/**/*.tfvars.json
+backend.hcl
+*.tfplan
+.helm/
+crash.log
+crash.*.log
+.DS_Store
+.vscode/
+.idea/

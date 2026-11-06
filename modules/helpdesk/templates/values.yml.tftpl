@@ -1,0 +1,144 @@
+# Names every resource <fullname>-...; the agent's existingClaim below relies on it.
+fullnameOverride: ${fullname}
+config:
+  cloudProvider: GCP
+  authFrontendBaseUrl: https://${helpdesk_dns}
+  authAllowedOrigins: https://${helpdesk_dns}
+  infraRegion: ${region}
+  googleCloudProject: ${project_id}
+  mongoDbDatabaseName: duplo-ai-helpdesk
+  aiStudioIsMasterDisabled: true
+  # Sign-in is the local admin only, who is also the one super user.
+  authSuperUsers: ${local_admin_email}
+backend:
+%{ if backend_image_tag != "" ~}
+  image:
+    tag: "${backend_image_tag}"
+%{ endif ~}
+%{ if storage_mode == "existing" ~}
+  # The NFS provisioner's class on the existing Filestore share (one subdirectory per volume).
+  persistence:
+    storageClass: ${storage_class_name}
+%{ endif ~}
+  serviceAccount:
+    name: ${backend_ksa}
+    annotations:
+      iam.gke.io/gcp-service-account: ${backend_gsa}
+%{ if length(backend_extra_env) > 0 ~}
+  extraEnv:
+%{ for e in backend_extra_env ~}
+    - name: ${e.name}
+      value: ${jsonencode(e.value)}
+%{ endfor ~}
+%{ endif ~}
+%{ if frontend_image_tag != "" ~}
+frontend:
+  image:
+    tag: "${frontend_image_tag}"
+%{ endif ~}
+duploAgent:
+%{ if agent_image_tag != "" ~}
+  image:
+    tag: "${agent_image_tag}"
+%{ endif ~}
+  # The agent mounts the backend's volume; naming it here stops the chart creating a second, unused claim
+  # (which in filestore mode would be a second Filestore instance).
+  persistence:
+    existingClaim: ${backend_claim}
+  serviceAccount:
+    name: ${agent_ksa}
+    annotations:
+      iam.gke.io/gcp-service-account: ${agent_gsa}
+  extraEnv:
+    - name: CLOUD_PROVIDER
+      value: GCP
+    - name: GOOGLE_CLOUD_PROJECT
+      value: ${project_id}
+  dind:
+    enabled: false
+%{ if storage_mode == "filestore" ~}
+# New Filestore (Basic HDD): the class comes from modules/storage, and the CSI driver creates one instance when the
+# backend volume binds; the agent shares that volume. The class's Retain keeps the instance after a destroy.
+filestore:
+  enabled: true
+  size: ${filestore_size}
+  storageClass:
+    create: false
+    name: ${storage_class_name}
+%{ endif ~}
+%{ if storage_mode == "incluster" ~}
+# The chart's NFS server on a Persistent Disk. Its StorageClass is cluster-scoped, so it is named per install.
+nfs-server:
+  enabled: true
+  storageClass:
+    name: ${storage_class_name}
+  persistence:
+    enabled: true
+    storageClass: standard-rwo
+    size: ${nfs_server_disk_size}
+%{ endif ~}
+xterm:
+  enabled: true
+  hostname: https://${helpdesk_xterm_dns}
+# Gateway API instead of Ingress; ingress.paths still drive the HTTPRoutes.
+ingress:
+  enabled: false
+internalIngress:
+  enabled: false
+gateway:
+  enabled: true
+  staticIpName: ${gateway_ip_name}
+  tls:
+    certMap: ${certificate_map_name}
+    sslPolicy: ${ssl_policy_name}
+  internal:
+    enabled: false
+# MongoDB on the Bitnami subchart as a StatefulSet; the chart's self-hosted MongoDB stays off.
+mongodb:
+  enabled: true
+  useStatefulSet: true
+  auth:
+    rootUser: helpdesk
+  selfHosted:
+    enabled: false
+  # Sub-chart mongodump backup disabled, as on AWS: the chart's own backup (mongodbBackup) renders a claim with the
+  # same name (<release>-mongodb-mongodump) and the two collide on a fresh install of chart >= 0.2.19. That claim
+  # keeps the chart default, the cluster's default Persistent Disk class (no Filestore instance); the release doesn't
+  # wait, so its WaitForFirstConsumer binding until the first nightly run holds nothing up.
+  backup:
+    enabled: false
+slackBackend:
+  enabled: ${slack_backend_enabled}
+%{ if slack_backend_enabled ~}
+%{ if slack_backend_image_tag != "" ~}
+  image:
+    tag: "${slack_backend_image_tag}"
+%{ endif ~}
+  env:
+    helpdeskDefaultAgent: "${slack_helpdesk_default_agent}"
+    helpdeskDefaultWorkspace: "${slack_helpdesk_default_workspace}"
+  # The Slack tokens are passed as sensitive Helm set values and never rendered into this document.
+  envFromSecret:
+    create: true
+    secretName: slack-managed-portals
+    data:
+      DUPLO_SLACK_APP_PORTALS: ${jsonencode(slack_app_portals)}
+      helpdeskDefaultAgent: "${slack_helpdesk_default_agent}"
+      helpdeskDefaultWorkspace: "${slack_helpdesk_default_workspace}"
+%{ endif ~}
+%{ if collector_enabled ~}
+collector:
+  enabled: true
+  product:
+    instance: ${deployment_name}
+  serviceAccount:
+    name: ${collector_ksa}
+    # The chart requires a value here; on GKE the annotation does the work.
+    irsaRoleArn: ${collector_gsa}
+    annotations:
+      iam.gke.io/gcp-service-account: ${collector_gsa}
+%{ endif ~}
+helpdeskMcp:
+  enabled: ${helpdesk_mcp_enabled}
+bedrockSubscription:
+  enabled: false
